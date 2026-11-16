@@ -1,0 +1,110 @@
+bundle:
+  name: bev_ops_agent
+
+include:
+  - resources/*.yml
+
+# one bundle state per environment: two BEV_ENV values deployed by the same user never share state
+workspace:
+  root_path: ~/.bundle/${bundle.name}/${var.env}
+
+# frontend/dist and the staged shared packages are gitignored but must ship with the app (staged by scripts/deploy.py build)
+sync:
+  include:
+    - app/frontend/dist/**
+    - app/config/**
+    - app/memory/**
+    - app/rag/**
+    - app/agent/**
+    - app/mlflow_setup/**
+
+# tags for every taggable resource the bundle manages (jobs, pipelines, experiments...). Apps take no tags:
+# their cost attribution is a budget/usage policy. Values come from BEV_TAGS (setup/config.py) via scripts/deploy.py.
+presets:
+  tags:
+    bev_project: ${var.tag_project}
+    owner: ${var.tag_owner}
+
+# Deployment identifiers only (no workspace host or profile here). scripts/deploy.py passes every value from
+# targets/<target>.env + .resolved.env (setup/config.py); the defaults below are only for `bundle validate`.
+variables:
+  env:
+    description: BEV_ENV suffix of this environment
+  tag_project:
+    default: bev_ops
+  tag_owner:
+    default: unset
+  catalog:
+    description: UC catalog holding the demo schema
+  schema:
+    description: UC schema with the tables, views, metric views, UC functions and Gateway model services
+  warehouse_id:
+    description: Serverless SQL warehouse the app queries as the user (users need CAN_USE)
+  lakebase_project_id:
+    description: Lakebase Autoscaling project (Lakebase Search enabled) with schemas rag, agent_mem, agent_ops, agent_ui
+  lakebase_branch_id:
+    default: production
+  lakebase_endpoint_id:
+    default: primary
+  lakebase_database:
+    description: Postgres database name
+    default: databricks_postgres
+  lakebase_database_id:
+    description: Lakebase database resource id (lowercase + hyphens) for the app binding
+    default: databricks-postgres
+  planner_group:
+    description: Databricks group for supply planners (read + propose); also its Lakebase role name
+  approver_group:
+    description: Databricks group for approvers (read + propose + decide); also its Lakebase role name
+  viewer_group:
+    description: Databricks group that reads traces and the MLflow experiment (operators, reviewers)
+    default: ""
+  llm_fast_service:
+    description: Unity AI Gateway model service for fast calls (routing, insights)
+    default: ${var.catalog}.${var.schema}.llm_fast
+  llm_reasoning_service:
+    description: Unity AI Gateway model service for reasoning turns
+    default: ${var.catalog}.${var.schema}.llm_reasoning
+  embedding_service:
+    description: Gateway embedding service (1024 dims, must match the RAG index)
+    default: system.ai.gte-large-en
+  genie_commercial:
+    description: Genie Agent space id (Commercial & Promotions)
+    default: ""
+  genie_supply:
+    description: Genie Agent space id (Supply & Replenishment)
+    default: ""
+  allow_self_approval:
+    description: "true = a requester may decide their own request (demo-only: one presenter holds planner+approver); false = four-eyes"
+    default: "false"
+  trace_salt_scope:
+    description: Secret scope holding the trace salt (random string; masks user ids in traces). Create it before the app phase.
+  trace_salt_key:
+    description: Key of the trace salt in that scope
+    default: trace-salt
+  manager_group:
+    description: "Group that must approve above the manager threshold; deploy.py passes the approver group when unset (Apps drops env entries with an empty value)"
+    default: ""
+  single_presenter_mode:
+    description: "1 = allow_self_approval=true takes effect inside Apps (one presenter holds planner+approver); 0 = ignored"
+    default: "0"
+  agent_mode:
+    description: "stub = scripted preview over the real tools; graph = the LangGraph agent in agent/ (default: a direct bundle deploy gets the real agent)"
+    default: graph
+  app_name:
+    description: Databricks App name (immutable after creation; lowercase + hyphens, max 30 chars)
+  mlflow_experiment_id:
+    description: MLflow experiment linked to a UC trace location with a table prefix (mlflow_setup/01_experiment.py prints it)
+  trace_table_prefix:
+    description: UC trace table prefix of that experiment (tables <catalog>.<schema>.<prefix>_otel_{annotations,logs,metrics,spans})
+    default: bev_ops
+  prompt_schema:
+    description: Schema holding only the prompts (<catalog>.<prompt_schema>.bev_ops_system / bev_ops_router)
+    default: ${var.schema}_prompts
+  prompt_alias:
+    description: UC Prompt Registry alias the agent loads (<catalog>.<prompt_schema>.bev_ops_system / bev_ops_router)
+    default: production
+
+targets:
+  dev:
+    default: true

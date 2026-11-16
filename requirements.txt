@@ -1,0 +1,25 @@
+fastapi==0.143.2
+starlette==1.8.0  # PIN: Range-header DoS fix (CVE-2025-62727)
+uvicorn==0.34.0
+databricks-sdk==0.120.0  # PIN: postgres.generate_database_credential(group_name=) removed in later SDKs
+psycopg[binary]>=3.2.10,<3.4  # databricks-langchain[memory] needs >=3.2.10 (resolved 3.3.8)
+psycopg-pool>=3.2.6,<3.4
+pydantic>=2.9,<3
+requests>=2.32
+pyyaml>=6.0
+# agent runtime (agent/, memory/, rag/) — resolved set verified with databricks-sdk 0.120.0 on py3.11
+databricks-langchain[memory]==0.22.0
+databricks-openai==0.17.0
+databricks-ai-bridge==0.22.0
+langgraph==1.2.20
+langchain-core==1.7.6
+langchain-mcp-adapters==0.3.1
+mcp>=1.25,<2  # PIN: mcp 2.x removed mcp.shared.context.RequestContext used by langchain-mcp-adapters
+mlflow-skinny==3.18.0  # app runtime pin (the laptop gets full mlflow below)
+sniffio>=1.3.1  # PIN: some PyPI proxies serve a broken sniffio 0.0.0
+# laptop-only: setup, eval, data generation, tests
+mlflow==3.18.0                   # same version as the app runtime (mlflow-skinny)
+numpy>=1.26
+pandas>=2.1
+pyarrow>=14
+pytest>=8

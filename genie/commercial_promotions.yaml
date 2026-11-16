@@ -1,0 +1,173 @@
+# Genie Agent config-as-code. ${catalog}/${schema} substituted at build time.
+# Layering: UC metadata -> metric views -> trusted functions -> joins -> snippets -> example SQL -> text instruction (last).
+title: "Acme Beverages - Commercial & Promotions"
+resolved_key: BEV_GENIE_COMMERCIAL   # the space id is saved here (targets/<target>.resolved.env); title gets the BEV_ENV suffix
+description: >-
+  Sell-out (depletions), sell-in (shipments), net revenue and trade promotion performance for Acme Beverages,
+  a fictitious beverage company (soft drinks, water, juices, energy drinks, beer) selling through three distributors
+  per market in 8 US states. Stock cover and replenishment live in the Supply & Replenishment agent.
+
+metric_views:
+  - identifier: ${catalog}.${schema}.depletions_metrics
+    description: Sell-out volume (cases) and net revenue USD. Use for any depletions, sell-out, volume, revenue, brand or market performance question.
+  - identifier: ${catalog}.${schema}.shipments_metrics
+    description: Sell-in volume (cases shipped to distributors). Use for shipments and sell-in vs sell-out comparisons.
+
+tables:
+  - identifier: ${catalog}.${schema}.dim_distributor
+    columns:
+      distributor_name: {entity_matching: true, synonyms: [distributor, wholesaler]}
+      channel: {entity_matching: true, synonyms: [route to market, trade channel]}
+  - identifier: ${catalog}.${schema}.dim_market
+    columns:
+      market_name: {entity_matching: true, synonyms: [country]}
+      region: {entity_matching: true}
+      currency: {exclude: true}
+  - identifier: ${catalog}.${schema}.dim_product
+    columns:
+      brand: {entity_matching: true}
+      product_name: {entity_matching: true, synonyms: [product, item]}
+      category: {entity_matching: true}
+      pack_type: {entity_matching: true}
+  - identifier: ${catalog}.${schema}.fact_promotions
+    columns:
+      mechanic: {entity_matching: true}
+      status: {entity_matching: true, synonyms: [promo status]}
+  - identifier: ${catalog}.${schema}.v_promo_distributor_uplift
+
+sql_functions:
+  - ${catalog}.${schema}.promo_by_distributor
+  - ${catalog}.${schema}.promo_performance
+
+join_specs:
+  # List ALL joins (FK ones too). build_space.py runs create -> update so the final state is exactly this list.
+  - left: dim_distributor
+    right: dim_market
+    condition: dim_distributor.market_id = dim_market.market_id
+    type: MANY_TO_ONE
+    comment: Distributor to its market
+  - left: fact_promotions
+    right: dim_product
+    condition: fact_promotions.sku = dim_product.sku
+    type: MANY_TO_ONE
+    comment: Promotion to promoted product
+  - left: fact_promotions
+    right: dim_market
+    condition: fact_promotions.market_id = dim_market.market_id
+    type: MANY_TO_ONE
+    comment: Promotion to market
+  - left: v_promo_distributor_uplift
+    right: fact_promotions
+    condition: v_promo_distributor_uplift.promo_id = fact_promotions.promo_id
+    type: MANY_TO_ONE
+    comment: Per-distributor uplift to its promotion
+
+sql_snippets:
+  filters:
+    - name: Active promotions
+      sql: fact_promotions.status = 'Active'
+    - name: Promotions below forecast
+      sql: fact_promotions.uplift_actual_pct < fact_promotions.uplift_forecast_pct
+  expressions:
+    - name: Uplift gap vs forecast
+      sql: fact_promotions.uplift_actual_pct - fact_promotions.uplift_forecast_pct
+
+example_sqls:
+  - question: Which active promotions are running below forecast?
+    sql: |
+      SELECT promo_id, market_id, sku, mechanic, uplift_forecast_pct, uplift_actual_pct,
+             uplift_actual_pct - uplift_forecast_pct AS gap_vs_forecast_pct
+      FROM ${catalog}.${schema}.fact_promotions
+      WHERE status = 'Active' AND uplift_actual_pct < uplift_forecast_pct
+      ORDER BY gap_vs_forecast_pct
+  - question: Which distributor is holding back promotion PR-0422?
+    sql: |
+      SELECT distributor_name, channel, pre_promo_avg_cases, in_promo_avg_cases, uplift_actual_pct, gap_vs_forecast_pct
+      FROM ${catalog}.${schema}.v_promo_distributor_uplift
+      WHERE promo_id = 'PR-0422'
+      ORDER BY uplift_actual_pct
+  - question: Which promotion mechanics delivered the best uplift on completed promotions?
+    sql: |
+      SELECT mechanic, count(*) AS promos, avg(uplift_actual_pct) AS avg_uplift, avg(uplift_actual_pct - uplift_forecast_pct) AS avg_gap
+      FROM ${catalog}.${schema}.fact_promotions
+      WHERE status = 'Completed'
+      GROUP BY mechanic
+      ORDER BY avg_uplift DESC
+  - question: Depletions and net revenue by brand in the last 4 weeks
+    sql: |
+      SELECT brand, MEASURE(cases_depleted) AS cases_depleted, MEASURE(net_revenue_usd) AS net_revenue_usd
+      FROM ${catalog}.${schema}.depletions_metrics
+      WHERE week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.fact_depletions) - INTERVAL 28 DAYS
+      GROUP BY brand
+      ORDER BY net_revenue_usd DESC
+  - question: Compare sell-in and sell-out by market in the last 8 weeks
+    sql: |
+      WITH so AS (
+        SELECT market_name, MEASURE(cases_depleted) AS sell_out_cases
+        FROM ${catalog}.${schema}.depletions_metrics
+        WHERE week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.fact_depletions) - INTERVAL 56 DAYS
+        GROUP BY market_name),
+      si AS (
+        SELECT market_name, MEASURE(cases_shipped) AS sell_in_cases
+        FROM ${catalog}.${schema}.shipments_metrics
+        WHERE week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.fact_shipments) - INTERVAL 56 DAYS
+        GROUP BY market_name)
+      SELECT so.market_name, si.sell_in_cases, so.sell_out_cases, si.sell_in_cases - so.sell_out_cases AS stock_build_cases
+      FROM so JOIN si ON so.market_name = si.market_name
+      ORDER BY stock_build_cases
+  - question: Brand growth last 8 weeks vs prior 8 weeks
+    sql: |
+      WITH mx AS (SELECT max(week_start) AS m FROM ${catalog}.${schema}.fact_depletions)
+      SELECT brand,
+             MEASURE(cases_depleted) FILTER (WHERE week_start > (SELECT m FROM mx) - INTERVAL 56 DAYS) AS last_8w,
+             MEASURE(cases_depleted) FILTER (WHERE week_start <= (SELECT m FROM mx) - INTERVAL 56 DAYS
+                                               AND week_start > (SELECT m FROM mx) - INTERVAL 112 DAYS) AS prior_8w
+      FROM ${catalog}.${schema}.depletions_metrics
+      GROUP BY brand
+      ORDER BY last_8w / prior_8w DESC
+  - question: Brand growth in one market, last 8 weeks vs prior 8 weeks
+    sql: |
+      WITH mx AS (SELECT max(week_start) AS m FROM ${catalog}.${schema}.fact_depletions)
+      SELECT brand,
+             MEASURE(cases_depleted) FILTER (WHERE week_start > (SELECT m FROM mx) - INTERVAL 56 DAYS) AS last_8w_cases,
+             MEASURE(cases_depleted) FILTER (WHERE week_start <= (SELECT m FROM mx) - INTERVAL 56 DAYS
+                                               AND week_start > (SELECT m FROM mx) - INTERVAL 112 DAYS) AS prior_8w_cases,
+             try_divide(last_8w_cases - prior_8w_cases, prior_8w_cases) AS growth
+      FROM ${catalog}.${schema}.depletions_metrics
+      WHERE market_name = 'Georgia'
+      GROUP BY brand
+      ORDER BY growth DESC
+
+text_instruction: |
+  - In metric views, MEASURE() takes only a measure column (for example cases_depleted, net_revenue_usd, cases_shipped), never a dimension such as week_start, brand or market_name. To compare periods, filter inside the aggregate: MEASURE(cases_depleted) FILTER (WHERE week_start > ...), anchored on the latest week_start in the data (see the "last N weeks vs prior N weeks" example).
+  - You answer for commercial and revenue management teams of Acme Beverages. Depletions = sell-out (distributor to retail); shipments = sell-in (Acme Beverages to distributor).
+  - Prefer metric views for volume and revenue (use MEASURE()). Use v_promo_distributor_uplift for promotion performance by distributor.
+  - "Last week" or "recent" means relative to the latest week_start in the data, not today's date.
+  - Uplift and discount columns are fractions: show them as percentages. Show cases without decimals and USD rounded to whole dollars.
+  - Shares and mixes (e.g. promo_share_of_cases, share of depletions) are fractions between 0 and 1. Return the fraction itself in the result column (do not multiply by 100 in SQL); write it as a percentage only in the text answer.
+  - Stock cover and replenishment questions belong to the Supply & Replenishment agent: say so briefly.
+  - Be concise and lead with the answer. Do not restate the question.
+
+sample_questions:
+  - Which active promotions are running below forecast?
+  - Which distributor is holding back promotion PR-0422?
+  - Which brands grew depletions the most in the last 8 weeks?
+  - Compare sell-in and sell-out by market
+
+benchmarks:
+  - question: Which active promotion has the largest shortfall against its uplift forecast?
+    sql: SELECT promo_id FROM ${catalog}.${schema}.fact_promotions WHERE status = 'Active' ORDER BY uplift_actual_pct - uplift_forecast_pct LIMIT 1
+  - question: For promotion PR-0422, which distributor has the lowest measured uplift?
+    sql: SELECT distributor_name FROM ${catalog}.${schema}.v_promo_distributor_uplift WHERE promo_id = 'PR-0422' ORDER BY uplift_actual_pct LIMIT 1
+  - question: What is the uplift forecast of promotion PR-0422?
+    sql: SELECT uplift_forecast_pct FROM ${catalog}.${schema}.fact_promotions WHERE promo_id = 'PR-0422'
+  - question: Which region had the highest net revenue in the last 4 weeks?
+    sql: SELECT region FROM ${catalog}.${schema}.depletions_metrics WHERE week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.fact_depletions) - INTERVAL 28 DAYS GROUP BY region ORDER BY MEASURE(net_revenue_usd) DESC LIMIT 1
+  - question: Total cases depleted of Harbor beer in California in the latest week
+    sql: SELECT MEASURE(cases_depleted) FROM ${catalog}.${schema}.depletions_metrics WHERE brand = 'Harbor' AND market_name = 'California' AND week_start = (SELECT max(week_start) FROM ${catalog}.${schema}.fact_depletions)
+  - question: What share of Fizzo depletions was sold on promotion in the last 8 weeks?
+    sql: SELECT MEASURE(promo_share_of_cases) FROM ${catalog}.${schema}.depletions_metrics WHERE brand = 'Fizzo' AND week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.fact_depletions) - INTERVAL 56 DAYS
+  - question: How many promotions are currently active?
+    sql: SELECT count(*) FROM ${catalog}.${schema}.fact_promotions WHERE status = 'Active'
+  - question: Which brand had the most net revenue in New York in the last 8 weeks?
+    sql: SELECT brand FROM ${catalog}.${schema}.depletions_metrics WHERE market_name = 'New York' AND week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.fact_depletions) - INTERVAL 56 DAYS GROUP BY brand ORDER BY MEASURE(net_revenue_usd) DESC LIMIT 1

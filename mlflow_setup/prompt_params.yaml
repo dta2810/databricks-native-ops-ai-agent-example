@@ -1,0 +1,8 @@
+# Default values for the prompt template variables. Override any key with env BEV_PROMPT_<KEY> (upper case).
+company: Acme Beverages
+company_description: "a fictitious beverage company (soft drinks, water, juices, energy drinks, beer; no spirits)."
+markets: "CA, TX, IL, GA, NY, AZ, FL, NC (US states)"
+currency: USD
+personas: "market sales leads (depletions, revenue, distributor performance), supply planners (stock cover, out-of-stock risk, replenishment) and revenue managers (trade promotions, uplift vs forecast)"
+distributor_id_example: TX-D1
+max_words: 150

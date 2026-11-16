@@ -1,0 +1,16 @@
+# Demo stories: single source for local e2e tests, app suggested prompts and eval smoke. Edit here, not in code.
+company: Acme Beverages
+stories:
+  oos:
+    title: Out-of-stock risk and replenishment approval
+    prompts:
+      - Which Volt Original positions in Texas are at risk of running out of stock? Propose a top-up for the worst one.
+    resume: {decision: approve, reason: local test}
+  credit_hold:
+    title: Decision memory (distributor on credit hold)
+    prompts:
+      - Harbor Lager 355ml Bottle is low at FL-D2. Should we top it up?
+  promo:
+    title: In-flight promotion below forecast
+    prompts:
+      - Why is promo PR-0422 underperforming at CA-D1, and is any other California distributor at risk because of it?

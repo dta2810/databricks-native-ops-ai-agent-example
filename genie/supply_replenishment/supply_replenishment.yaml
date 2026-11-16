@@ -1,0 +1,215 @@
+# Genie Agent config-as-code: Acme Beverages - Supply & Replenishment.
+# ${catalog} and ${schema} are substituted at build time.
+# Layering (most to least reliable): UC metadata -> metric views -> trusted functions -> joins -> snippets -> example SQL -> text instruction.
+title: "Acme Beverages - Supply & Replenishment"
+resolved_key: BEV_GENIE_SUPPLY   # the space id is saved here (targets/<target>.resolved.env); title gets the BEV_ENV suffix
+description: >-
+  Distributor inventory and stock cover, sell-in (shipments from Acme Beverages) vs sell-out (depletions from distributors),
+  out-of-stock risk, replenishment needs and the replenishment request log for Acme Beverages, a fictitious beverage company
+  selling through three distributors per market in 8 US states. Built for supply planners.
+  Trade promotions are out of scope (covered by a separate agent).
+
+metric_views:
+  - identifier: ${catalog}.${schema}.depletions_metrics
+    description: Sell-out volume (cases depleted) and net revenue USD from distributors to retail. Use for depletions, sell-out and sell-out revenue by market, distributor, channel, brand or SKU.
+  - identifier: ${catalog}.${schema}.shipments_metrics
+    description: Sell-in volume (cases shipped from Acme Beverages to distributors). Use for shipments and sell-in totals by market, distributor, channel, brand or SKU.
+
+tables:
+  - identifier: ${catalog}.${schema}.dim_market
+    columns:
+      market_name: {entity_matching: true, synonyms: [country]}
+      region: {entity_matching: true}
+      currency: {exclude: true}
+      _rescued_data: {exclude: true}
+  - identifier: ${catalog}.${schema}.dim_distributor
+    columns:
+      distributor_name: {entity_matching: true, synonyms: [distributor, wholesaler]}
+      channel: {entity_matching: true, synonyms: [route to market, trade channel]}
+      _rescued_data: {exclude: true}
+  - identifier: ${catalog}.${schema}.dim_product
+    columns:
+      brand: {entity_matching: true}
+      product_name: {entity_matching: true, synonyms: [product, item, SKU name]}
+      category: {entity_matching: true}
+      pack_type: {entity_matching: true}
+      _rescued_data: {exclude: true}
+  - identifier: ${catalog}.${schema}.v_stock_cover
+    columns:
+      status: {entity_matching: true, synonyms: [risk status, stock status]}
+      cover_days: {synonyms: [days of stock, days of cover, stock cover]}
+      target_cover_days: {description: Channel target cover in days (Modern Trade, Traditional Trade or On-Premise target), synonyms: [target cover, target days]}
+      avg_weekly_depletion_8w: {description: Average weekly depletions in cases per distributor and SKU over the last 8 weeks (sell-out run rate)}
+      weekly_revenue_at_risk_usd: {description: Average weekly net revenue in USD of the distributor and SKU over the last 8 weeks. Summed only for positions with status AT RISK when quantifying revenue at risk.}
+  - identifier: ${catalog}.${schema}.v_sell_in_out_weekly
+  - identifier: ${catalog}.${schema}.replenishment_requests
+    columns:
+      status: {entity_matching: true, synonyms: [request status, approval status]}
+      requested_by: {synonyms: [requester]}
+      approved_by: {synonyms: [approver]}
+
+sql_functions:
+  - ${catalog}.${schema}.stock_cover
+  - ${catalog}.${schema}.oos_risk_skus
+  - ${catalog}.${schema}.suggest_replenishment
+
+join_specs:
+  # Declare ALL joins here (single source of truth). On create, Genie also injects joins from UC foreign keys;
+  # build_space.py always runs create -> update so the final state is exactly this list (update replaces join_specs).
+  - left: dim_distributor
+    right: dim_market
+    condition: dim_distributor.market_id = dim_market.market_id
+    type: MANY_TO_ONE
+    comment: Distributor to its market
+  - left: v_stock_cover
+    right: dim_market
+    condition: v_stock_cover.market_id = dim_market.market_id
+    type: MANY_TO_ONE
+    comment: Stock position to its market
+  - left: replenishment_requests
+    right: dim_market
+    condition: replenishment_requests.market_id = dim_market.market_id
+    type: MANY_TO_ONE
+    comment: Replenishment request to its market
+  - left: replenishment_requests
+    right: dim_distributor
+    condition: replenishment_requests.distributor_id = dim_distributor.distributor_id
+    type: MANY_TO_ONE
+    comment: Replenishment request to its distributor
+  - left: replenishment_requests
+    right: dim_product
+    condition: replenishment_requests.sku = dim_product.sku
+    type: MANY_TO_ONE
+    comment: Replenishment request to its SKU
+
+sql_snippets:
+  filters:
+    - name: At-risk stock positions
+      sql: v_stock_cover.status = 'AT RISK'
+    - name: Stock positions below channel target
+      sql: v_stock_cover.status = 'BELOW TARGET'
+    - name: Pending replenishment requests
+      sql: replenishment_requests.status = 'Pending'
+    - name: Distributor stock drawing down
+      sql: v_sell_in_out_weekly.stock_build_cases < 0
+  expressions:
+    - name: Days of cover gap vs target
+      sql: v_stock_cover.cover_days - v_stock_cover.target_cover_days
+  measures:
+    - name: Positions at risk
+      sql: COUNT_IF(v_stock_cover.status = 'AT RISK')
+    - name: Weekly revenue at risk (USD)
+      sql: SUM(CASE WHEN v_stock_cover.status = 'AT RISK' THEN v_stock_cover.weekly_revenue_at_risk_usd ELSE 0 END)
+    - name: Net stock build (cases)
+      sql: SUM(v_sell_in_out_weekly.stock_build_cases)
+    - name: Pending request quantity (cases)
+      sql: SUM(CASE WHEN replenishment_requests.status = 'Pending' THEN replenishment_requests.qty_cases ELSE 0 END)
+
+example_sqls:
+  - question: Which distributor and SKU positions are at risk of running out of stock in Texas, by revenue at risk?
+    sql: |
+      SELECT distributor_name, channel, product_name, cover_days, target_cover_days, weekly_revenue_at_risk_usd
+      FROM ${catalog}.${schema}.v_stock_cover
+      WHERE market_id = 'TX' AND status = 'AT RISK'
+      ORDER BY weekly_revenue_at_risk_usd DESC
+  - question: How many days of stock does each distributor hold of Volt Original 473ml Can in California?
+    sql: |
+      SELECT distributor_name, channel, on_hand_cases, in_transit_cases, cover_days, target_cover_days, status
+      FROM ${catalog}.${schema}.stock_cover('CA', 'VT-ORIG-473C')
+      ORDER BY cover_days
+  - question: Which positions are at risk of stock-out across all markets?
+    sql: |
+      SELECT market_id, distributor_name, product_name, cover_days, weekly_revenue_at_risk_usd
+      FROM ${catalog}.${schema}.oos_risk_skus(NULL, 7)
+      ORDER BY weekly_revenue_at_risk_usd DESC
+      LIMIT 20
+  - question: How many cases should we replenish for distributor CA-D1 and Volt Original 473ml Can?
+    sql: |
+      SELECT distributor_id, sku, cover_days, target_cover_days, recommended_qty_cases, needs_manager_approval, policy_note
+      FROM ${catalog}.${schema}.suggest_replenishment('CA-D1', 'VT-ORIG-473C')
+  - question: How many cases should we replenish for Sunny Grove Apple 1L Tetra at distributor AZ-D2?
+    sql: |
+      SELECT distributor_id, sku, cover_days, target_cover_days, recommended_qty_cases, needs_manager_approval, policy_note
+      FROM ${catalog}.${schema}.suggest_replenishment('AZ-D2', (SELECT sku FROM ${catalog}.${schema}.dim_product WHERE product_name = 'Sunny Grove Apple 1L Tetra'))
+  - question: Did distributors receive more stock than they sold out in each market over the last 8 weeks?
+    sql: |
+      SELECT market_name,
+             SUM(cases_shipped) AS sell_in_cases,
+             SUM(cases_depleted) AS sell_out_cases,
+             SUM(stock_build_cases) AS stock_build_cases
+      FROM ${catalog}.${schema}.v_sell_in_out_weekly
+      WHERE week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.v_sell_in_out_weekly) - INTERVAL 56 DAYS
+      GROUP BY market_name
+      ORDER BY stock_build_cases DESC
+  - question: Sell-in vs sell-out by distributor for the last 8 weeks, biggest stock draw-down first
+    sql: |
+      SELECT distributor_name, channel, SUM(cases_shipped) AS sell_in_cases, SUM(cases_depleted) AS sell_out_cases,
+             SUM(stock_build_cases) AS stock_build_cases
+      FROM ${catalog}.${schema}.v_sell_in_out_weekly
+      WHERE week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.v_sell_in_out_weekly) - INTERVAL 56 DAYS
+      GROUP BY distributor_name, channel
+      ORDER BY stock_build_cases ASC
+      LIMIT 10
+  - question: Sell-out cases and net revenue by brand in the last 4 weeks
+    sql: |
+      SELECT brand, MEASURE(cases_depleted) AS cases_depleted, MEASURE(net_revenue_usd) AS net_revenue_usd
+      FROM ${catalog}.${schema}.depletions_metrics
+      WHERE week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.v_sell_in_out_weekly) - INTERVAL 28 DAYS
+      GROUP BY brand
+      ORDER BY net_revenue_usd DESC
+  - question: How many replenishment requests are pending, and how many cases do they total?
+    sql: |
+      SELECT COUNT(*) AS pending_requests, COALESCE(SUM(qty_cases), 0) AS pending_cases
+      FROM ${catalog}.${schema}.replenishment_requests
+      WHERE status = 'Pending'
+  - question: Brand growth in one market, last 8 weeks vs prior 8 weeks
+    sql: |
+      WITH mx AS (SELECT max(week_start) AS m FROM ${catalog}.${schema}.fact_depletions)
+      SELECT brand,
+             MEASURE(cases_depleted) FILTER (WHERE week_start > (SELECT m FROM mx) - INTERVAL 56 DAYS) AS last_8w_cases,
+             MEASURE(cases_depleted) FILTER (WHERE week_start <= (SELECT m FROM mx) - INTERVAL 56 DAYS
+                                               AND week_start > (SELECT m FROM mx) - INTERVAL 112 DAYS) AS prior_8w_cases,
+             try_divide(last_8w_cases - prior_8w_cases, prior_8w_cases) AS growth
+      FROM ${catalog}.${schema}.depletions_metrics
+      WHERE market_name = 'Georgia'
+      GROUP BY brand
+      ORDER BY growth DESC
+
+text_instruction: |
+  - In metric views, MEASURE() takes only a measure column (for example cases_depleted, net_revenue_usd, cases_shipped), never a dimension such as week_start, brand or market_name. To compare periods, filter inside the aggregate: MEASURE(cases_depleted) FILTER (WHERE week_start > ...), anchored on the latest week_start in the data (see the "last N weeks vs prior N weeks" example).
+  - You answer for supply planners of Acme Beverages. Scope: distributor stock cover, sell-in vs sell-out, out-of-stock risk, replenishment needs and the replenishment request log. Trade promotions are out of scope: say so in one line and stop.
+  - Depletions are sell-out (distributor to retail). Shipments are sell-in (Acme Beverages to distributor). Use depletions_metrics and shipments_metrics with MEASURE() for totals by market, brand or channel.
+  - Use v_stock_cover for stock cover and status by distributor and SKU, stock_cover for one market and SKU, oos_risk_skus for risk lists, and suggest_replenishment for a quantity.
+  - Use v_sell_in_out_weekly for sell-in vs sell-out by distributor and SKU, and replenishment_requests for the request log.
+  - stock_cover, oos_risk_skus and suggest_replenishment take SKU codes (dim_product.sku), not product names: look up the code from dim_product.product_name first.
+  - "Latest week", "last N weeks" and "current" mean relative to the latest week_start and the latest inventory snapshot in the data, not today's date.
+  - Never create or approve a replenishment request. Present the suggested quantity and say that the planner must get explicit approval; quantities above 500 cases need a supply planning manager.
+  - Be concise and lead with the answer. Show cover in whole days and cases without decimals; show USD rounded to whole dollars.
+
+sample_questions:
+  - Which distributors are at risk of running out of stock this week?
+  - How many days of stock do we hold of each SKU in Texas?
+  - Did distributors receive more stock than they sold out over the last 8 weeks?
+  - How many cases should we replenish for a distributor and SKU?
+
+benchmarks:
+  - question: How many distributor and SKU positions are at risk of running out of stock?
+    sql: SELECT count(*) FROM ${catalog}.${schema}.v_stock_cover WHERE status = 'AT RISK'
+  - question: How many days of stock does NY-D1 hold of Volt Original 473ml Can?
+    sql: SELECT cover_days FROM ${catalog}.${schema}.v_stock_cover WHERE distributor_id = 'NY-D1' AND sku = 'VT-ORIG-473C'
+  - question: Which market has the most at-risk stock positions?
+    sql: SELECT market_id FROM ${catalog}.${schema}.v_stock_cover WHERE status = 'AT RISK' GROUP BY market_id ORDER BY count(*) DESC LIMIT 1
+  - question: What is the weekly revenue at risk in USD for positions at risk of stock-out?
+    sql: SELECT round(SUM(weekly_revenue_at_risk_usd), 0) FROM ${catalog}.${schema}.v_stock_cover WHERE status = 'AT RISK'
+  - question: Which brand has the most at-risk stock positions?
+    sql: SELECT brand FROM ${catalog}.${schema}.v_stock_cover WHERE status = 'AT RISK' GROUP BY brand ORDER BY count(*) DESC LIMIT 1
+  - question: How many pending replenishment requests are in the log?
+    sql: SELECT count(*) FROM ${catalog}.${schema}.replenishment_requests WHERE status = 'Pending'
+  - question: Total cases shipped to distributors in Texas in the latest 4 weeks
+    sql: SELECT round(SUM(cases_shipped), 1) FROM ${catalog}.${schema}.v_sell_in_out_weekly WHERE market_id = 'TX' AND week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.v_sell_in_out_weekly) - INTERVAL 28 DAYS
+  - question: Which distributor drew down the most stock (sell-out above sell-in) over the last 8 weeks?
+    sql: SELECT distributor_name FROM ${catalog}.${schema}.v_sell_in_out_weekly WHERE week_start > (SELECT max(week_start) FROM ${catalog}.${schema}.v_sell_in_out_weekly) - INTERVAL 56 DAYS GROUP BY distributor_name ORDER BY SUM(stock_build_cases) ASC LIMIT 1
+  - question: Total cases depleted of Harbor Lager 355ml Bottle in California in the latest week
+    sql: SELECT round(SUM(cases_depleted), 1) FROM ${catalog}.${schema}.v_sell_in_out_weekly WHERE brand = 'Harbor' AND market_id = 'CA' AND product_name = 'Harbor Lager 355ml Bottle' AND week_start = (SELECT max(week_start) FROM ${catalog}.${schema}.v_sell_in_out_weekly)
+  - question: How many cases does the suggested replenishment for AZ-D2 and Sunny Grove Apple 1L Tetra bring to target?
+    sql: SELECT recommended_qty_cases FROM ${catalog}.${schema}.suggest_replenishment('AZ-D2', 'SG-APPL-1000T')

@@ -1,0 +1,5 @@
+# Prompt templates behind the app's "Ask the agent" buttons. {{vars}} are filled from the row the user clicked.
+whyPromo: "Why is promo {{promo_id}} running below forecast?"
+replenish: "What should we send to {{distributor_id}} for {{product_name}} ({{sku}})?"
+distributor: "What needs attention at {{distributor_id}} {{distributor_name}} this week?"
+anyRisk: "Which positions are about to run out of stock, and what should we send?"

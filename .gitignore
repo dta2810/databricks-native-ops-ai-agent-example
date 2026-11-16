@@ -1,0 +1,24 @@
+.env
+data/out/
+__pycache__/
+*.pyc
+.venv/
+mlflow.db
+mlruns/
+
+# app build + staged shared packages (scripts/deploy.py build)
+node_modules/
+app/frontend/dist/
+app/config/
+app/memory/
+app/rag/
+app/agent/
+app/mlflow_setup/
+.venv-app/
+.databricks/
+*.local.yml
+# per-target settings and generated ids
+targets/*
+!targets/example.env
+.DS_Store
+.pytest_cache/

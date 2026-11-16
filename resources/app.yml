@@ -1,0 +1,113 @@
+resources:
+  apps:
+    bev_ops_agent:
+      name: ${var.app_name}
+      description: Beverage Ops Agent (OBO to UC, Lakebase and the Unity AI Gateway)
+      source_code_path: ../app
+      # keep identical to user_authorization.scopes in app/app.yaml (bundle deploys replace the app record)
+      user_api_scopes: [sql, postgres, genie, ai-gateway]
+      config:
+        command: ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+        env:
+          # four-eyes unless var.allow_self_approval=true (demo-only; deploy knob BEV_DEPLOY_ALLOW_SELF_APPROVAL, default false)
+          - name: BEV_ALLOW_SELF_APPROVAL
+            value: ${var.allow_self_approval}
+          # inside Apps, self-approval needs BOTH allow_self_approval=true and this flag (one presenter, demo only)
+          - name: BEV_SINGLE_PRESENTER_MODE
+            value: ${var.single_presenter_mode}
+          - name: BEV_CATALOG
+            value: ${var.catalog}
+          - name: BEV_SCHEMA
+            value: ${var.schema}
+          - name: BEV_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: LAKEBASE_ENDPOINT
+            value: projects/${var.lakebase_project_id}/branches/${var.lakebase_branch_id}/endpoints/${var.lakebase_endpoint_id}
+          - name: BEV_LAKEBASE_PROJECT
+            value: ${var.lakebase_project_id}
+          - name: BEV_LAKEBASE_BRANCH
+            value: ${var.lakebase_branch_id}
+          - name: BEV_LAKEBASE_ENDPOINT
+            value: ${var.lakebase_endpoint_id}
+          - name: BEV_LAKEBASE_DATABASE
+            value: ${var.lakebase_database}
+          - name: BEV_PLANNER_GROUP
+            value: ${var.planner_group}
+          - name: BEV_APPROVER_GROUP
+            value: ${var.approver_group}
+          - name: BEV_LLM_FAST_SERVICE
+            value: ${var.llm_fast_service}
+          - name: BEV_LLM_REASONING_SERVICE
+            value: ${var.llm_reasoning_service}
+          - name: BEV_EMBEDDING_SERVICE
+            value: ${var.embedding_service}
+          - name: BEV_GENIE_COMMERCIAL
+            value: ${var.genie_commercial}
+          - name: BEV_GENIE_SUPPLY
+            value: ${var.genie_supply}
+          - name: BEV_AGENT_MODE
+            value: ${var.agent_mode}
+          - name: BEV_DEMO_CASES
+            value: config/demo_cases.yaml
+          # MLflow runs as the app service principal (no Apps user scope for MLflow)
+          - name: BEV_MLFLOW_EXPERIMENT_ID
+            value: ${var.mlflow_experiment_id}
+          - name: BEV_TRACE_UC_SCHEMA
+            value: ${var.catalog}.${var.schema}
+          - name: BEV_TRACE_TABLE_PREFIX
+            value: ${var.trace_table_prefix}
+          - name: MLFLOW_TRACING_SQL_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: BEV_PROMPT_ALIAS
+            value: ${var.prompt_alias}
+          - name: BEV_PROMPT_SCHEMA
+            value: ${var.prompt_schema}
+          # secret key for masked user ids in traces (HMAC); the app refuses to start without it while masking is on
+          - name: BEV_TRACE_SALT
+            value_from: trace-salt
+          # above the manager threshold only this group approves; empty = the approver group (no separate manager)
+          - name: BEV_MANAGER_GROUP
+            value: ${var.manager_group}
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+        - name: lakebase
+          postgres:
+            branch: projects/${var.lakebase_project_id}/branches/${var.lakebase_branch_id}
+            database: projects/${var.lakebase_project_id}/branches/${var.lakebase_branch_id}/databases/${var.lakebase_database_id}
+            # the only permission Apps offers for postgres; setup/52_lakebase_access.py revokes CREATE from the SP role afterwards
+            permission: CAN_CONNECT_AND_CREATE
+        # tracing: experiment CAN_EDIT + MODIFY on exactly the four UC trace tables of this experiment. MLflow writes traces
+        # through these tables and UC offers no append-only privilege, so MODIFY is required (it grants MODIFY+SELECT;
+        # USE CATALOG/SCHEMA auto-granted). No other table in the schema is writable by the app.
+        - name: experiment
+          experiment:
+            experiment_id: ${var.mlflow_experiment_id}
+            permission: CAN_EDIT
+        - name: trace-annotations
+          uc_securable:
+            securable_full_name: ${var.catalog}.${var.schema}.${var.trace_table_prefix}_otel_annotations
+            securable_type: TABLE
+            permission: MODIFY
+        - name: trace-logs
+          uc_securable:
+            securable_full_name: ${var.catalog}.${var.schema}.${var.trace_table_prefix}_otel_logs
+            securable_type: TABLE
+            permission: MODIFY
+        - name: trace-metrics
+          uc_securable:
+            securable_full_name: ${var.catalog}.${var.schema}.${var.trace_table_prefix}_otel_metrics
+            securable_type: TABLE
+            permission: MODIFY
+        - name: trace-spans
+          uc_securable:
+            securable_full_name: ${var.catalog}.${var.schema}.${var.trace_table_prefix}_otel_spans
+            securable_type: TABLE
+            permission: MODIFY
+        - name: trace-salt
+          secret:
+            scope: ${var.trace_salt_scope}
+            key: ${var.trace_salt_key}
+            permission: READ
